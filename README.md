@@ -39,4 +39,6 @@ Analyzes inline CSP violations from Microsoft Purview audit logs and generates i
 
 
 ## More Information
-https://www.youtube.com/watch?v=OOFQQJTtAkM
+
+[![Watch the video](https://i.ytimg.com/vi/OOFQQJTtAkM/hqdefault.jpg))](https://youtu.be/OOFQQJTtAkM)
+
