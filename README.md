@@ -34,3 +34,7 @@ Analyzes inline CSP violations from Microsoft Purview audit logs and generates i
 3. Export your audit logs from Microsoft Purview as a CSV file
 
 4. Run the appropriate script with your CSV file as input
+
+
+## More Information
+https://www.youtube.com/watch?v=OOFQQJTtAkM
