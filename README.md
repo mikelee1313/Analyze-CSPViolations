@@ -40,5 +40,7 @@ Analyzes inline CSP violations from Microsoft Purview audit logs and generates i
 
 ## More Information
 
+**Video: Introduction to Content Security Policy (CSP) in SharePoint Online**
+
 [![Watch the video](https://i.ytimg.com/vi/OOFQQJTtAkM/hqdefault.jpg)](https://youtu.be/OOFQQJTtAkM)
 
