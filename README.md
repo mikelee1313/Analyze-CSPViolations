@@ -1,16 +1,36 @@
 # Analyze CSP Violations
 
-This repository contains scripts for analyzing Content Security Policy (CSP) violations.
+Parses large CSV audit log exports from Microsoft Purview, extracts CSP violation data (DocumentUrl / BlockedUrl), aggregates violations by blocked domain, and generates a standalone interactive HTML report for SharePoint Administrators.
 
 ## Scripts Included
 
-1. **CSP Report Analyzer**  
-   Analyze reports generated from the browser for CSP violations. [View Script](script1.js)  
-   [README for CSP Report Analyzer](script1_README.md)
+### 1. Analyze-CSPViolations.ps1
+Analyzes standard CSP violations from Microsoft Purview audit logs and generates interactive HTML reports.
 
-2. **CSP Violation Collector**  
-   Collect and aggregate CSP violation reports from multiple sources. [View Script](script2.js)  
-   [README for CSP Violation Collector](script2_README.md)
+- **Script**: [Analyze-CSPViolations.ps1](https://github.com/mikelee1313/Analyze-CSPViolations/blob/main/Analyze-CSPViolations.ps1)
+- **Documentation**: [README-Analyze-CSPViolations.md](https://github.com/mikelee1313/Analyze-CSPViolations/blob/main/README-Analyze-CSPViolations.md)
 
-## Usage
-Make sure to refer to the individual README files for detailed instructions on how to use each script.
+### 2. Analyze-CSPInlineViolations.ps1
+Analyzes inline CSP violations from Microsoft Purview audit logs and generates interactive HTML reports.
+
+- **Script**: [Analyze-CSPInlineViolations.ps1](https://github.com/mikelee1313/Analyze-CSPViolations/blob/main/Analyze-CSPInlineViolations.ps1)
+- **Documentation**: [README-Analyze-InlineCSPViolations.md](https://github.com/mikelee1313/Analyze-CSPViolations/blob/main/README-Analyze-InlineCSPViolations.md)
+
+## Quick Links
+
+- [View Analyze-CSPViolations.ps1](https://github.com/mikelee1313/Analyze-CSPViolations/blob/main/Analyze-CSPViolations.ps1)
+- [View Analyze-CSPInlineViolations.ps1](https://github.com/mikelee1313/Analyze-CSPViolations/blob/main/Analyze-CSPInlineViolations.ps1)
+- [Read CSP Violations Documentation](https://github.com/mikelee1313/Analyze-CSPViolations/blob/main/README-Analyze-CSPViolations.md)
+- [Read Inline CSP Violations Documentation](https://github.com/mikelee1313/Analyze-CSPViolations/blob/main/README-Analyze-InlineCSPViolations.md)
+
+## Getting Started
+
+1. Choose the script that matches your needs:
+   - Use **Analyze-CSPViolations.ps1** for standard CSP violations
+   - Use **Analyze-CSPInlineViolations.ps1** for inline CSP violations
+
+2. Review the corresponding README file for detailed instructions
+
+3. Export your audit logs from Microsoft Purview as a CSV file
+
+4. Run the appropriate script with your CSV file as input
