@@ -39,7 +39,8 @@
 
 .NOTES
     Author  : Mike Lee
-    Version : 1.4.0 Minor updates for better JSON parsing and additional stats, add well-known CDN path overrides.
+    Version : 1.4.0 Minor updates for better JSON parsing and additional stats, add well-known CDN path overrides, 
+                                added option to copy full URLs to allow-list details for manual review.
     Date    : 2/23/2026
     Updated : 2/25/2026
     Tested  : PowerShell 5.1, PowerShell 7+
@@ -907,6 +908,14 @@ $html = @"
     .progress-pill.green { background:#dff6dd; color:#107c10; font-weight:600; }
     .progress-pill.red   { background:#fde7e9; color:#a4262c; font-weight:600; }
     .progress-pill.amber { background:#fff4ce; color:#7d6608; font-weight:600; }
+    .rem-toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px; padding:12px 16px; background:#f3f2f1; border-radius:6px; border:1px solid #edebe9; }
+    .rem-export-btn { border:none; border-radius:4px; padding:7px 16px; font-size:13px; cursor:pointer; font-family:inherit; display:flex; align-items:center; gap:6px; font-weight:500; white-space:nowrap; }
+    .rem-export-btn.btn-copy-allowed { background:#dff6dd; color:#107c10; border:1px solid #a8d8a8; }
+    .rem-export-btn.btn-copy-allowed:hover { background:#c8edc8; }
+    .rem-export-btn.btn-copy-allowed.copied { background:#107c10; color:#fff; border-color:#107c10; }
+    .rem-export-btn.btn-export-csv { background:#fff; color:#323130; border:1px solid #c8c6c4; }
+    .rem-export-btn.btn-export-csv:hover { background:#edebe9; }
+    .rem-toolbar-note { font-size:12px; color:#605e5c; margin-left:4px; }
 
 
     /* ── URL cell ── */
@@ -1087,13 +1096,19 @@ $(($allowList | Sort-Object | ForEach-Object {
     <p class="section-note">
       For each URL prefix below, decide whether the resource is legitimate (allow it in the tenant CSP policy),
       unwanted (remove the script from the page), or needs further review.
-      Check the box once a decision has been made. Use the buttons at the top to copy the final allow-list.
+      Once decisions are made, use <strong>Copy Allowed URLs</strong> to copy just the approved prefixes,
+      or <strong>Export CSV</strong> to download the full decision table for sharing or review in Excel.
     </p>
     <div class="progress-summary" id="progressSummary">
       <span class="progress-pill" id="pill_pending">$allowListCount pending</span>
       <span class="progress-pill green" id="pill_allow" style="display:none">0 to allow</span>
       <span class="progress-pill red"   id="pill_remove" style="display:none">0 to remove</span>
       <span class="progress-pill amber" id="pill_review" style="display:none">0 to review</span>
+    </div>
+    <div class="rem-toolbar">
+      <button class="rem-export-btn btn-copy-allowed" id="copyAllowedBtn" onclick="copyAllowed()">&#128203; Copy Allowed URLs</button>
+      <button class="rem-export-btn btn-export-csv"  onclick="exportRemediationCsv()">&#8659; Export to CSV</button>
+      <span class="rem-toolbar-note" id="remToolbarNote">Mark decisions using the row buttons, then export.</span>
     </div>
     <div class="table-wrap">
       <table id="remediationTable" class="data-table">
@@ -1195,6 +1210,18 @@ $(($allowList | Sort-Object | ForEach-Object {
     set('pill_review',  review  + ' to review',  review  > 0);
     if (pending === 0 && document.getElementById('pill_pending'))
       document.getElementById('pill_pending').style.display = 'none';
+    // Update toolbar note
+    const note = document.getElementById('remToolbarNote');
+    if (note) {
+      const total = allow + remove + review + pending;
+      if (allow > 0 && pending === 0 && remove === 0 && review === 0) {
+        note.textContent = '\u2713 All ' + allow + ' entr' + (allow === 1 ? 'y' : 'ies') + ' marked as Allow \u2014 ready to copy.';
+      } else if (allow > 0) {
+        note.textContent = allow + ' of ' + total + ' marked as Allow \u2014 ' + pending + ' still pending.';
+      } else {
+        note.textContent = 'Mark decisions using the row buttons, then export.';
+      }
+    }
   }
 
   /* ── Expand/Collapse Sites ── */
@@ -1217,6 +1244,60 @@ $(($allowList | Sort-Object | ForEach-Object {
     raw.style.display   = isHidden ? 'block' : 'none';
     chips.style.display = isHidden ? 'none'  : 'flex';
     btn.textContent     = isHidden ? '\uD83D\uDCC4 Show as chips' : '\uD83D\uDCC4 Show as plain text';
+  }
+
+  /* ── Remediation: Copy only Allowed entries ── */
+  function copyAllowed() {
+    const rows  = document.querySelectorAll('#remediationTable tbody tr.rem-row.dec-allow');
+    const lines = Array.from(rows).map(r => {
+      const code = r.querySelector('.prefix-cell code');
+      return code ? code.textContent.trim() : '';
+    }).filter(Boolean);
+    if (!lines.length) {
+      alert('No entries are marked as Allowed yet.\nUse the \u2713 Allow button on each row first.');
+      return;
+    }
+    const text = lines.join('\n');
+    const btn  = document.getElementById('copyAllowedBtn');
+    const orig = btn.innerHTML;
+    const finish = () => {
+      btn.innerHTML = '\u2713 Copied ' + lines.length + ' entr' + (lines.length === 1 ? 'y' : 'ies') + '!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 2500);
+    };
+    navigator.clipboard.writeText(text).then(finish).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+      document.body.removeChild(ta); finish();
+    });
+  }
+
+  /* ── Remediation: Export full decision table to CSV ── */
+  function exportRemediationCsv() {
+    const rows   = document.querySelectorAll('#remediationTable tbody tr.rem-row');
+    const decMap = { 'dec-allow': 'Allow', 'dec-remove': 'Remove', 'dec-investigate': 'Review' };
+    const esc    = v => '"' + String(v).trim().replace(/"/g, '""') + '"';
+    const csvRows = [['URL Prefix', 'Violations', 'Affected Sites', 'Unique URLs Seen', 'Decision'].map(esc)];
+    rows.forEach(r => {
+      const prefix  = (r.querySelector('.prefix-cell code') || {}).textContent || '';
+      const viol    = (r.querySelector('.count-cell')       || {}).textContent || '';
+      const siteBtn = r.querySelector('.sites-cell .expand-btn');
+      const sites   = siteBtn ? siteBtn.textContent.replace(/\s*\u25bc\s*$/,'').trim() : '';
+      const urlcnt  = (r.querySelector('.urlcount-cell')    || {}).textContent || '';
+      let decision  = 'Pending';
+      for (const [cls, label] of Object.entries(decMap)) {
+        if (r.classList.contains(cls)) { decision = label; break; }
+      }
+      csvRows.push([prefix, viol, sites, urlcnt, decision].map(esc));
+    });
+    const csv  = csvRows.map(r => r.join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = 'CSP_Domains_Decisions.csv';
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
   }
 
   /* ── Allow-List: Copy to Clipboard ── */
