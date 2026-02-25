@@ -17,7 +17,10 @@ Microsoft Purview captures every CSP violation as a `ContentSecurityPolicyViolat
 ## Features
 
 - **High-performance CSV parsing** — uses fast regex-based JSON extraction instead of `ConvertFrom-Json` per row, handling 100k+ row exports efficiently with live progress reporting
+- **CSP keyword filtering** — automatically excludes CSP directive pseudo-values (`inline`, `eval`, `unsafe-inline`, `blob`, `about:blank`, `relative-path.invalid`, nonce/hash prefixes, etc.) from domain stats; these inflate domain counts and can push real blocked domains out of the summary table
 - **Smart allow-list minimization** — computes the longest common URL path prefix per hostname so one entry covers many versioned files (no hostname wildcards, which SharePoint CSP does not support)
+- **Tenant-scoped SharePoint CDN entries** — auto-detects the customer's SharePoint tenant hostname from `DocumentUrl` values and scopes `public-cdn.sharepointonline.com` / `publiccdn.sharepointonline.com` entries to `https://public-cdn.sharepointonline.com/<tenant>.sharepoint.com/` rather than trusting the entire shared CDN
+- **Well-known domain overrides** — a built-in override table ensures certain domains always produce the right CSP prefix regardless of which specific URLs appear in the audit data (e.g. `www.clarity.ms` always generates `https://www.clarity.ms/` rather than a per-customer tag ID path)
 - **Interactive HTML report** — fully standalone (no internet required), with:
   - Summary cards: total violations, unique blocked domains, affected sites, date range, allow-list count vs. 300-entry limit
   - Script Source Allow-List section with usage bar, copy-to-clipboard, and chip/plain-text toggle
@@ -93,7 +96,8 @@ The key output of the report. Each entry is the **minimal URL prefix** that cove
 
 | Seen in data | Allow-list entry generated | Rationale |
 |---|---|---|
-| `https://www.clarity.ms/tag/abc123` | `https://www.clarity.ms/` | Single URL from host → origin only |
+| `https://www.clarity.ms/tag/abc123` | `https://www.clarity.ms/` | Well-known override — Clarity tag IDs are customer-unique; trusting the full domain covers all current and future paths |
+| `https://public-cdn.sharepointonline.com/tenant.sharepoint.com/...` | `https://public-cdn.sharepointonline.com/tenant.sharepoint.com/` | Tenant-scoped CDN — path is restricted to that customer's own SharePoint hostname |
 | `https://cdn.walkme.com/player/lib/v1/a.js` `https://cdn.walkme.com/player/lib/v1/b.js` | `https://cdn.walkme.com/player/lib/v1/` | Multiple files, common path → shared folder prefix |
 | `https://cdn.example.com/v1/a.js` `https://cdn.example.com/v2/b.js` | `https://cdn.example.com/` | No common deep path → origin only |
 
@@ -117,7 +121,46 @@ A live progress tally tracks how many entries are in each state.
 
 ## How the Allow-List is Minimized
 
-The script groups all `BlockedUrl` values by hostname, then for each hostname computes the **longest common URL path prefix** across all unique blocked URLs from that host:
+Allow-list entries are produced in three priority tiers:
+
+### 1. CSP Keyword & Pseudo-Domain Filtering
+
+Before any domain is counted or allow-listed, the script discards `BlockedUrl` values whose resolved "domain" is a CSP directive keyword or a Microsoft-internal sentinel rather than a real external hostname. The filtered values include:
+
+| Value | Source |
+|---|---|
+| `inline`, `eval`, `unsafe-inline`, `unsafe-eval` | CSP directive keywords for inline/eval violations |
+| `self`, `none`, `strict-dynamic`, `wasm-unsafe-eval` | CSP source expression keywords |
+| `data`, `blob`, `about`, `about:blank` | URI scheme pseudo-domains |
+| `relative-path.invalid` | Microsoft sentinel for relative-path violations |
+| `nonce-*`, `sha256-*`, `sha384-*`, `sha512-*` | CSP hash/nonce source expressions |
+
+Without this filter these pseudo-values inflate the unique-domain count and can push legitimate blocked domains out of the `TopDomains` summary table. The count of filtered rows is reported in the console as **CSP keywords**.
+
+### 2. Well-Known Domain Overrides
+
+Certain hostnames are assigned a fixed CSP prefix regardless of what specific URLs appear in the audit data, because the automatic common-path algorithm would produce an entry that is either too narrow (locked to a specific per-customer ID) or too broad:
+
+| Hostname | Fixed entry | Reason |
+|---|---|---|
+| `www.clarity.ms` | `https://www.clarity.ms/` | Tag IDs (e.g. `/tag/jxmt8etn16`) are unique per customer — trusting the full domain covers all paths without over-specifying |
+
+Add new entries to the `$wellKnownPathOverrides` hashtable in the script for any future hostnames that need similar treatment.
+
+### 3. Tenant-Scoped SharePoint CDN Entries
+
+The script auto-detects the customer's SharePoint tenant hostname by tallying all `*.sharepoint.com` hosts seen in `DocumentUrl` values and picking the most frequent one. `public-cdn.sharepointonline.com` and `publiccdn.sharepointonline.com` are then scoped to that tenant rather than trusting the full shared CDN:
+
+```
+https://public-cdn.sharepointonline.com/contoso.sharepoint.com/
+https://publiccdn.sharepointonline.com/contoso.sharepoint.com/
+```
+
+This prevents one customer's allow-list entry from covering another tenant's CDN assets. The detected tenant hostname is printed to the console as **SP tenant host**.
+
+### 4. Automatic Common-Path Computation (general case)
+
+For all other hostnames the script groups all `BlockedUrl` values by hostname and computes the **longest common URL path prefix** across all unique blocked URLs from that host:
 
 ```
 All URLs from cdn.walkme.com:
@@ -129,7 +172,9 @@ Common prefix: /player/lib/20260114-155748-1bcf23ac/
 Allow-list entry: https://cdn.walkme.com/player/lib/20260114-155748-1bcf23ac/
 ```
 
-This avoids unnecessarily broad origins when a vendor consistently serves from versioned paths. If URLs are spread across many paths, it falls back to the origin (`https://cdn.walkme.com/`).
+If URLs are spread across many paths, it falls back to the origin (`https://cdn.walkme.com/`). If only a single distinct URL was seen from a host, the entry is the origin only.
+
+Finally, the full list is **deduplicated**: if a broader prefix already subsumes a more specific one, the specific entry is dropped.
 
 > **No hostname wildcards** (e.g. `*.clarity.ms`) are generated. SharePoint Online's CSP allow-list does not support hostname wildcards — only URL prefixes.
 
@@ -164,7 +209,9 @@ Processing CSV and extracting CSP violation data...
 Processing complete.
   Rows processed : 87,423
   Rows matched   : 87,423
-  Rows skipped   : 0
+  Rows skipped   : 0 (no DocumentUrl/BlockedUrl found)
+  CSP keywords   : 9,189 (inline/eval/blob/relative-path etc. — not real domains, excluded from stats)
+  SP tenant host       : contoso.sharepoint.com (used to scope SharePoint CDN entries)
 
   Allow-list entries   : 14 (of 300 tenant limit)
 
@@ -234,4 +281,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 ## Author
 
 **Mike Lee**  
-Version 1.0.0 — February 2026
+Version 1.4.0 — February 2026
