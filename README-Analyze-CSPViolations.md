@@ -18,7 +18,7 @@ Microsoft Purview captures every CSP violation as a `ContentSecurityPolicyViolat
 
 - **High-performance CSV parsing** — uses fast regex-based JSON extraction instead of `ConvertFrom-Json` per row, handling 100k+ row exports efficiently with live progress reporting
 - **CSP keyword filtering** — automatically excludes CSP directive pseudo-values (`inline`, `eval`, `unsafe-inline`, `blob`, `about:blank`, `relative-path.invalid`, nonce/hash prefixes, etc.) from domain stats; these inflate domain counts and can push real blocked domains out of the summary table
-- **Smart allow-list minimization** — computes the longest common URL path prefix per hostname so one entry covers many versioned files (no hostname wildcards, which SharePoint CSP does not support)
+- **Smart allow-list minimization** — computes the longest common URL path prefix per hostname so one entry covers many versioned files (no hostname wildcards, which SharePoint CSP supports but not recommended).
 - **Tenant-scoped SharePoint CDN entries** — auto-detects the customer's SharePoint tenant hostname from `DocumentUrl` values and scopes `public-cdn.sharepointonline.com` / `publiccdn.sharepointonline.com` entries to `https://public-cdn.sharepointonline.com/<tenant>.sharepoint.com/` rather than trusting the entire shared CDN
 - **Well-known domain overrides** — a built-in override table ensures certain domains always produce the right CSP prefix regardless of which specific URLs appear in the audit data (e.g. `www.clarity.ms` always generates `https://www.clarity.ms/` rather than a per-customer tag ID path)
 - **Interactive HTML report** — fully standalone (no internet required), with:
@@ -176,7 +176,7 @@ If URLs are spread across many paths, it falls back to the origin (`https://cdn.
 
 Finally, the full list is **deduplicated**: if a broader prefix already subsumes a more specific one, the specific entry is dropped.
 
-> **No hostname wildcards** (e.g. `*.clarity.ms`) are generated. SharePoint Online's CSP allow-list does not support hostname wildcards — only URL prefixes.
+> **No hostname wildcards** (e.g. `*.clarity.ms`) are generated. SharePoint Online's CSP allow-list does  support hostname wildcards, but not recommended.
 
 ---
 
