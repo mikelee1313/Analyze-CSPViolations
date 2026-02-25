@@ -39,8 +39,9 @@
 
 .NOTES
     Author  : Mike Lee
-    Version : 1.0.0
+    Version : 1.3.0 Minor updates for better JSON parsing and additional stats
     Date    : 2/23/2026
+    Updated : 2/25/2026
     Tested  : PowerShell 5.1, PowerShell 7+
 
     The script resolves DocumentUrl / BlockedUrl from:
@@ -145,8 +146,8 @@ function Get-HtmlEscaped {
 #region ── Output Path Resolution ──────────────────────────────────────────────
 
 $csvFullPath = (Resolve-Path $CsvPath).Path
-$csvDir      = Split-Path $csvFullPath -Parent
-$stamp       = Get-Date -Format 'yyyyMMdd_HHmmss'
+$csvDir = Split-Path $csvFullPath -Parent
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
 if (-not $OutputPath) {
     $OutputPath = Join-Path $csvDir "CSP_Report_$stamp.html"
@@ -185,22 +186,37 @@ Write-Host "Total data rows: $(Format-Number $totalRows)`n" -ForegroundColor Gre
 Write-Host "Processing CSV and extracting CSP violation data..." -ForegroundColor Yellow
 
 # Data structures
-$domainStats        = [System.Collections.Generic.Dictionary[string, hashtable]]::new()
-$siteDomainMap      = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new()
-$blockedUrlsByHost  = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new()
-$fullUrlPairs       = [System.Collections.Generic.List[hashtable]]::new()   # Only if -IncludeFullUrls
-$dateList           = [System.Collections.Generic.List[datetime]]::new()
+$domainStats = [System.Collections.Generic.Dictionary[string, hashtable]]::new()
+$siteDomainMap = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new()
+$blockedUrlsByHost = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new()
+$fullUrlPairs = [System.Collections.Generic.List[hashtable]]::new()   # Only if -IncludeFullUrls
+$dateList = [System.Collections.Generic.List[datetime]]::new()
+$spTenantHostCount = [System.Collections.Generic.Dictionary[string, int]]::new()  # tracks DocumentUrl *.sharepoint.com hosts
 
-$processedRows  = 0
-$matchedRows    = 0
-$skippedRows    = 0
-$progressStep   = [Math]::Max(1, [Math]::Floor($totalRows / 100))  # Update every 1%
+$processedRows = 0
+$matchedRows = 0
+$skippedRows = 0
+$cspKeywordRows = 0
+$progressStep = [Math]::Max(1, [Math]::Floor($totalRows / 100))  # Update every 1%
+
+# CSP special keywords / pseudo-domains that are NOT real external hostnames.
+# BlockedUrl values like 'inline', 'eval', about:blank, or Microsoft's
+# 'relative-path.invalid' sentinel appear as domain names if not filtered out.
+# They inflate the unique-domain count and can crowd real domains out of the
+# TopDomains summary table or the allow-list.
+$cspPseudoDomains = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@('inline', 'eval', 'unsafe-inline', 'unsafe-eval', 'self', 'none',
+        'wasm-unsafe-eval', 'strict-dynamic', 'report-sample',
+        'data', 'blob', 'about', 'about:blank',
+        'localhost', 'relative-path.invalid',
+        '(unknown)'),
+    [System.StringComparer]::OrdinalIgnoreCase)
 
 # Column presence flags (determined on first row)
-$hasTopLevelDocUrl    = $false
-$hasTopLevelBlockUrl  = $false
-$hasAuditDataCol      = $false
-$columnsInspected     = $false
+$hasTopLevelDocUrl = $false
+$hasTopLevelBlockUrl = $false
+$hasAuditDataCol = $false
+$columnsInspected = $false
 
 try {
     $csvData = Import-Csv -Path $csvFullPath -Encoding UTF8 -ErrorAction Stop
@@ -219,12 +235,12 @@ foreach ($row in $csvData) {
         $colNames = $row.PSObject.Properties.Name
 
         # Check for top-level URL columns (various casings)
-        $docUrlCol   = $colNames | Where-Object { $_ -in @('DocumentUrl','DocumentURL','documentUrl','documentURL') } | Select-Object -First 1
-        $blockUrlCol = $colNames | Where-Object { $_ -in @('BlockedUrl','BlockedURL','blockedUrl','blockedURL') }     | Select-Object -First 1
+        $docUrlCol = $colNames | Where-Object { $_ -in @('DocumentUrl', 'DocumentURL', 'documentUrl', 'documentURL') } | Select-Object -First 1
+        $blockUrlCol = $colNames | Where-Object { $_ -in @('BlockedUrl', 'BlockedURL', 'blockedUrl', 'blockedURL') }     | Select-Object -First 1
 
-        $hasTopLevelDocUrl   = $null -ne $docUrlCol
+        $hasTopLevelDocUrl = $null -ne $docUrlCol
         $hasTopLevelBlockUrl = $null -ne $blockUrlCol
-        $hasAuditDataCol     = $colNames -contains $AuditDataColumn
+        $hasAuditDataCol = $colNames -contains $AuditDataColumn
 
         Write-Host "  Columns detected:" -ForegroundColor DarkCyan
         Write-Host "    Top-level DocumentUrl : $hasTopLevelDocUrl  $(if($docUrlCol){"[$docUrlCol]"})"
@@ -241,10 +257,10 @@ foreach ($row in $csvData) {
     }
 
     # ── Extract DocumentUrl & BlockedUrl ──────────────────────────────────
-    $docUrl   = $null
+    $docUrl = $null
     $blockUrl = $null
 
-    if ($hasTopLevelDocUrl)   { $docUrl   = $row.$docUrlCol }
+    if ($hasTopLevelDocUrl) { $docUrl = $row.$docUrlCol }
     if ($hasTopLevelBlockUrl) { $blockUrl = $row.$blockUrlCol }
 
     # Fall back to / supplement from AuditData JSON if needed
@@ -284,6 +300,16 @@ foreach ($row in $csvData) {
     $domain = Get-UrlDomain -Url $blockUrl
     if (-not $domain) { $domain = '(unknown)' }
 
+    # ── Skip CSP special keywords & pseudo-domains ───────────────────────
+    # Values like 'inline', 'eval', about:blank, relative-path.invalid, and
+    # localhost are CSP directive keywords or Microsoft sentinels – not real
+    # external hostnames.  Counting them as domains inflates ranking and can
+    # push legitimate blocked domains out of the TopDomains summary table.
+    if ($cspPseudoDomains.Contains($domain) -or $domain -match '^nonce-|^sha256-|^sha384-|^sha512-') {
+        $cspKeywordRows++
+        continue
+    }
+
     # ── Extract SP site collection URL ────────────────────────────────────
     # SharePoint managed paths (/sites/, /teams/, etc.) are 2 segments deep,
     # so the site collection is always: scheme://host/managedpath/sitename
@@ -291,25 +317,33 @@ foreach ($row in $csvData) {
     $site = $docUrl
     try {
         $uri = [System.Uri]$docUrl
-        $spManagedPaths = @('sites','teams','portals','personal','search','hub')
+        $spManagedPaths = @('sites', 'teams', 'portals', 'personal', 'search', 'hub')
         if ($uri.Segments.Count -ge 3 -and
             ($uri.Segments[1].TrimEnd('/') -in $spManagedPaths)) {
             # Named site collection: take scheme://host/managedpath/sitename
             $site = "$($uri.Scheme)://$($uri.Host)$($uri.Segments[0])$($uri.Segments[1])$($uri.Segments[2])"
-        } else {
+        }
+        else {
             # Root site collection
             $site = "$($uri.Scheme)://$($uri.Host)"
         }
         $site = $site.TrimEnd('/')
+
+        # Track the tenant hostname for CDN scoping (public-cdn / publiccdn)
+        $th = $uri.Host.ToLowerInvariant()
+        if ($th -like '*.sharepoint.com') {
+            if ($spTenantHostCount.ContainsKey($th)) { $spTenantHostCount[$th]++ }
+            else { $spTenantHostCount[$th] = 1 }
+        }
     }
     catch { <# use raw docUrl #> }
 
     # ── Capture date ──────────────────────────────────────────────────────
     $dateStr = $null
-    if ($row.PSObject.Properties['CreationDate'])  { $dateStr = $row.CreationDate }
+    if ($row.PSObject.Properties['CreationDate']) { $dateStr = $row.CreationDate }
     if (-not $dateStr -and $row.PSObject.Properties['CreationTime']) { $dateStr = $row.CreationTime }
     if (-not $dateStr -and $hasAuditDataCol) {
-        $dateStr = Get-JsonStringValue -Json $row.$AuditDataColumn -FieldNames @('CreationTime','creationTime')
+        $dateStr = Get-JsonStringValue -Json $row.$AuditDataColumn -FieldNames @('CreationTime', 'creationTime')
     }
     if ($dateStr) {
         try { $dateList.Add([datetime]::Parse($dateStr)) } catch {}
@@ -353,6 +387,7 @@ Write-Host "Processing complete." -ForegroundColor Green
 Write-Host "  Rows processed : $(Format-Number $processedRows)"
 Write-Host "  Rows matched   : $(Format-Number $matchedRows)"
 Write-Host "  Rows skipped   : $(Format-Number $skippedRows) (no DocumentUrl/BlockedUrl found)"
+Write-Host "  CSP keywords   : $(Format-Number $cspKeywordRows) (inline/eval/blob/relative-path etc. — not real domains, excluded from stats)"
 Write-Host ""
 
 if ($matchedRows -eq 0) {
@@ -365,18 +400,19 @@ if ($matchedRows -eq 0) {
 #region ── Aggregate Statistics ───────────────────────────────────────────────
 
 $sortedDomains = $domainStats.GetEnumerator() |
-    Sort-Object { $_.Value.Count } -Descending |
-    Select-Object -First $TopDomains
+Sort-Object { $_.Value.Count } -Descending |
+Select-Object -First $TopDomains
 
 $uniqueDomainCount = $domainStats.Count
-$uniqueSiteCount   = $siteDomainMap.Count
+$uniqueSiteCount = $siteDomainMap.Count
 
 $dateMin = if ($dateList.Count -gt 0) { ($dateList | Measure-Object -Minimum).Minimum } else { $null }
 $dateMax = if ($dateList.Count -gt 0) { ($dateList | Measure-Object -Maximum).Maximum } else { $null }
 
 $dateRangeStr = if ($dateMin -and $dateMax) {
     "$($dateMin.ToString('yyyy-MM-dd')) → $($dateMax.ToString('yyyy-MM-dd'))"
-} else { 'Unknown' }
+}
+else { 'Unknown' }
 
 #── Build Minimized Script-Source Allow-List ───────────────────────────────────
 # Strategy (no wildcards in hostnames — not supported by SharePoint CSP policy):
@@ -405,7 +441,7 @@ function Get-CspAllowEntry {
         Sort-Object -Unique)
 
     # Parse first URL to establish the origin
-    try   { $first = [System.Uri]$clean[0] }
+    try { $first = [System.Uri]$clean[0] }
     catch { return $clean[0] }               # unparseable – return as-is
 
     $origin = "$($first.Scheme)://$($first.Host)"
@@ -416,8 +452,8 @@ function Get-CspAllowEntry {
     # Multiple URLs → find longest common path prefix
     # @() forces array so $paths[0] is always an element, never a character
     $paths = @($clean | ForEach-Object {
-        try { ([System.Uri]$_).AbsolutePath } catch { '/' }
-    })
+            try { ([System.Uri]$_).AbsolutePath } catch { '/' }
+        })
 
     $commonPath = $paths[0]
     foreach ($p in $paths[1..($paths.Count - 1)]) {
@@ -436,21 +472,42 @@ function Get-CspAllowEntry {
     return "$origin$folderPath"
 }
 
-$allowList        = [System.Collections.Generic.List[string]]::new()
+# Determine the primary SP tenant hostname from DocumentUrl values.
+# The most-seen *.sharepoint.com host is used to scope public-cdn and publiccdn
+# allow-list entries to this tenant rather than trusting the full CDN domain.
+$spTenantHost = if ($spTenantHostCount.Count -gt 0) {
+    ($spTenantHostCount.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Key
+}
+else { $null }
+if ($spTenantHost) {
+    Write-Host "  SP tenant host       : $spTenantHost (used to scope SharePoint CDN entries)" -ForegroundColor DarkCyan
+}
+
+$allowList = [System.Collections.Generic.List[string]]::new()
 $allowListDetails = [System.Collections.Generic.List[hashtable]]::new()
 
 foreach ($hostname in ($blockedUrlsByHost.Keys | Sort-Object)) {
-    $urls  = @($blockedUrlsByHost[$hostname])
-    $entry = Get-CspAllowEntry -Urls $urls
+    $urls = @($blockedUrlsByHost[$hostname])
+
+    # public-cdn.sharepointonline.com and publiccdn.sharepointonline.com serve
+    # tenant-specific cached assets under a path matching the tenant hostname.
+    # Scope the allow-list entry to that path rather than allowing the whole CDN
+    # (which would cover every other tenant's assets too).
+    if ($hostname -in @('public-cdn.sharepointonline.com', 'publiccdn.sharepointonline.com') -and $spTenantHost) {
+        $entry = "https://$hostname/$spTenantHost/"
+    }
+    else {
+        $entry = Get-CspAllowEntry -Urls $urls
+    }
     $allowList.Add($entry)
     $allowListDetails.Add(@{
-        UrlPrefix  = $entry
-        Hostname   = $hostname
-        Violations = $domainStats[$hostname].Count
-        SiteCount  = $domainStats[$hostname].Sites.Count
-        Sites      = $domainStats[$hostname].Sites
-        UrlCount   = $urls.Count
-    })
+            UrlPrefix  = $entry
+            Hostname   = $hostname
+            Violations = $domainStats[$hostname].Count
+            SiteCount  = $domainStats[$hostname].Sites.Count
+            Sites      = $domainStats[$hostname].Sites
+            UrlCount   = $urls.Count
+        })
 }
 
 # Deduplicate: remove any entry that is a prefix of another entry
@@ -458,17 +515,17 @@ foreach ($hostname in ($blockedUrlsByHost.Keys | Sort-Object)) {
 #  the more specific one is redundant — the shorter prefix already covers it)
 # @() ensures this is always an array even when only one entry survives
 $allowList = @($allowList | Sort-Object | Where-Object {
-    $candidate = $_
-    -not ($allowList | Where-Object { $_ -ne $candidate -and $candidate.StartsWith($_) })
-} | Sort-Object)
+        $candidate = $_
+        -not ($allowList | Where-Object { $_ -ne $candidate -and $candidate.StartsWith($_) })
+    } | Sort-Object)
 
 # Filter details to match surviving entries; sort by violation count descending
 $allowListDetails = @($allowListDetails |
     Where-Object { $allowList -contains $_.UrlPrefix } |
     Sort-Object { $_.Violations } -Descending)
 
-$allowListCount  = @($allowList).Count
-$allowListPct    = [Math]::Round(($allowListCount / 300) * 100, 1)
+$allowListCount = @($allowList).Count
+$allowListPct = [Math]::Round(($allowListCount / 300) * 100, 1)
 $allowListStatus = if ($allowListCount -le 20) { 'good' } elseif ($allowListCount -le 100) { 'warn' } else { 'bad' }
 
 Write-Host "  Allow-list entries   : $allowListCount (of 300 tenant limit)" -ForegroundColor $(
@@ -486,16 +543,16 @@ $remediationRows = [System.Text.StringBuilder]::new()
 $remRank = 0
 foreach ($detail in $allowListDetails) {
     $remRank++
-    $rowId    = "rem_$remRank"
-    $prefix   = $detail.UrlPrefix
+    $rowId = "rem_$remRank"
+    $prefix = $detail.UrlPrefix
     $hostname = $detail.Hostname
-    $viol     = Format-Number $detail.Violations
-    $siteCnt  = $detail.SiteCount
-    $urlCnt   = $detail.UrlCount
+    $viol = Format-Number $detail.Violations
+    $siteCnt = $detail.SiteCount
+    $urlCnt = $detail.UrlCount
 
     $siteLinksHtml = ($detail.Sites | Sort-Object | ForEach-Object {
-        "<div class='site-item'><a href='$(Get-HtmlEscaped $_)' target='_blank' rel='noopener'>$(Get-HtmlEscaped $_)</a></div>"
-    }) -join ''
+            "<div class='site-item'><a href='$(Get-HtmlEscaped $_)' target='_blank' rel='noopener'>$(Get-HtmlEscaped $_)</a></div>"
+        }) -join ''
     $expandId = "remexp_$remRank"
 
     $null = $remediationRows.AppendLine(@"
@@ -524,15 +581,15 @@ $domainTableRows = [System.Text.StringBuilder]::new()
 $rank = 0
 foreach ($entry in $sortedDomains) {
     $rank++
-    $d        = $entry.Key
-    $count    = $entry.Value.Count
+    $d = $entry.Key
+    $count = $entry.Value.Count
     $sitesSet = $entry.Value.Sites
-    $pct      = [Math]::Round(($count / $matchedRows) * 100, 1)
+    $pct = [Math]::Round(($count / $matchedRows) * 100, 1)
     $barWidth = [Math]::Max(1, [Math]::Round($pct))
 
     $siteListHtml = ($sitesSet | Sort-Object | ForEach-Object {
-        "<div class='site-item'><a href='$(Get-HtmlEscaped $_)' target='_blank' rel='noopener'>$(Get-HtmlEscaped $_)</a></div>"
-    }) -join ''
+            "<div class='site-item'><a href='$(Get-HtmlEscaped $_)' target='_blank' rel='noopener'>$(Get-HtmlEscaped $_)</a></div>"
+        }) -join ''
 
     $expandId = "expand_$rank"
 
@@ -562,35 +619,35 @@ foreach ($entry in $sortedDomains) {
 #── Site Summary Table Rows ────────────────────────────────────────────────────
 $siteTableRows = [System.Text.StringBuilder]::new()
 $siteDomainMap.GetEnumerator() |
-    Sort-Object { $_.Value.Count } -Descending |
-    Select-Object -First 50 |
-    ForEach-Object {
-        $s          = $_.Key
-        $domainList = ($_.Value | Sort-Object) -join ', '
-        $null = $siteTableRows.AppendLine(@"
+Sort-Object { $_.Value.Count } -Descending |
+Select-Object -First 50 |
+ForEach-Object {
+    $s = $_.Key
+    $domainList = ($_.Value | Sort-Object) -join ', '
+    $null = $siteTableRows.AppendLine(@"
 <tr>
   <td><a href='$(Get-HtmlEscaped $s)' target='_blank' rel='noopener'>$(Get-HtmlEscaped $s)</a></td>
   <td class='count-cell'>$($_.Value.Count)</td>
   <td class='domain-list-cell'>$(Get-HtmlEscaped $domainList)</td>
 </tr>
 "@)
-    }
+}
 
 #── Full URL Pairs Table (optional) ───────────────────────────────────────────
 $fullUrlSection = ''
 if ($IncludeFullUrls -and $fullUrlPairs.Count -gt 0) {
     $fullRows = [System.Text.StringBuilder]::new()
     $fullUrlPairs |
-        Sort-Object { $_['Domain'] } |
-        ForEach-Object {
-            $null = $fullRows.AppendLine(@"
+    Sort-Object { $_['Domain'] } |
+    ForEach-Object {
+        $null = $fullRows.AppendLine(@"
 <tr>
   <td class='url-cell'><a href='$(Get-HtmlEscaped $_["DocumentUrl"])' target='_blank' rel='noopener'>$(Get-HtmlEscaped $_["DocumentUrl"])</a></td>
   <td class='url-cell'><a href='$(Get-HtmlEscaped $_["BlockedUrl"])' target='_blank' rel='noopener'>$(Get-HtmlEscaped $_["BlockedUrl"])</a></td>
   <td>$(Get-HtmlEscaped $_["Domain"])</td>
 </tr>
 "@)
-        }
+    }
 
     $fullUrlSection = @"
 <section id='full-urls'>
