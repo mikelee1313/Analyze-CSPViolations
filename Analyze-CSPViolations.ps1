@@ -39,7 +39,7 @@
 
 .NOTES
     Author  : Mike Lee
-    Version : 1.3.0 Minor updates for better JSON parsing and additional stats
+    Version : 1.4.0 Minor updates for better JSON parsing and additional stats, add well-known CDN path overrides.
     Date    : 2/23/2026
     Updated : 2/25/2026
     Tested  : PowerShell 5.1, PowerShell 7+
@@ -486,14 +486,33 @@ if ($spTenantHost) {
 $allowList = [System.Collections.Generic.List[string]]::new()
 $allowListDetails = [System.Collections.Generic.List[hashtable]]::new()
 
+# Well-known domain path overrides.
+# For certain hostnames the automatic common-path computation produces entries
+# that are either too broad (origin-only when there is only one tag/asset URL)
+# or unnecessarily deep (locking in a specific asset version or tag ID).
+# Each entry maps a hostname → the fixed CSP URL prefix that should always be
+# used for that host, regardless of the specific URLs seen in the audit data.
+#
+# Add new entries here as more well-known CDNs are identified.
+$wellKnownPathOverrides = @{
+    # Clarity tag IDs are unique per site/customer (e.g. /tag/jxmt8etn16).
+    # Trusting the full domain is intentional: it covers all current and future
+    # managed paths without tying the entry to a specific tag ID or path segment.
+    'www.clarity.ms' = 'https://www.clarity.ms/'
+}
+
 foreach ($hostname in ($blockedUrlsByHost.Keys | Sort-Object)) {
     $urls = @($blockedUrlsByHost[$hostname])
 
+    # Well-known overrides take highest priority.
+    if ($wellKnownPathOverrides.ContainsKey($hostname)) {
+        $entry = $wellKnownPathOverrides[$hostname]
+    }
     # public-cdn.sharepointonline.com and publiccdn.sharepointonline.com serve
     # tenant-specific cached assets under a path matching the tenant hostname.
     # Scope the allow-list entry to that path rather than allowing the whole CDN
     # (which would cover every other tenant's assets too).
-    if ($hostname -in @('public-cdn.sharepointonline.com', 'publiccdn.sharepointonline.com') -and $spTenantHost) {
+    elseif ($hostname -in @('public-cdn.sharepointonline.com', 'publiccdn.sharepointonline.com') -and $spTenantHost) {
         $entry = "https://$hostname/$spTenantHost/"
     }
     else {
